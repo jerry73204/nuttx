@@ -359,15 +359,15 @@ void mmu_l2_map_pages(const struct page_mapping_s *mappings,
 #ifndef CONFIG_ARCH_ROMPGTABLE
 void mmu_invalidate_region(uintptr_t vstart, size_t size)
 {
-  uint32_t vaddr = vstart & 0xfffff000;
-  uint32_t vend  = vstart + size;
+  UNUSED(vstart);
+  UNUSED(size);
 
-  /* Loop, invalidating regions */
+  /* Invalidate entire TLB instead of per-page.  Per-page invalidation via
+   * cp15_invalidate_tlb_bymva() is extremely slow under QEMU emulation
+   * (each MCR is emulated individually).  A single TLBIALL is sufficient
+   * during boot-time page table setup and is orders of magnitude faster.
+   */
 
-  while (vaddr < vend)
-    {
-      cp15_invalidate_tlb_bymva(vaddr);
-      vaddr += 4096;
-    }
+  cp15_invalidate_tlbs();
 }
 #endif
