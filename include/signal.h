@@ -293,15 +293,15 @@
  */
 
 #define SIG_ERR         ((_sa_handler_t)-1)  /* And error occurred */
-#define SIG_IGN         ((_sa_handler_t)0)   /* Ignore the signal */
 
-#ifdef CONFIG_SIG_DEFAULT
-#  define SIG_DFL       ((_sa_handler_t)1)   /* Default signal action */
-#  define SIG_HOLD      ((_sa_handler_t)2)   /* Used only with sigset() */
-#else
-#  define SIG_DFL       ((_sa_handler_t)0)   /* Default is SIG_IGN for all signals */
-#  define SIG_HOLD      ((_sa_handler_t)1)   /* Used only with sigset() */
-#endif
+/* Match Linux/POSIX convention: SIG_DFL=0, SIG_IGN=1.
+ * Required for compatibility with Rust's std library (libc crate) which
+ * assumes the Linux convention and cannot be patched via build-std.
+ */
+
+#define SIG_DFL         ((_sa_handler_t)0)   /* Default signal action */
+#define SIG_IGN         ((_sa_handler_t)1)   /* Ignore the signal */
+#define SIG_HOLD        ((_sa_handler_t)2)   /* Used only with sigset() */
 
 #define GOOD_SIGNO(s)     (((unsigned)(s)) <= ((unsigned)(MAX_SIGNO)))
 #define UNCAUGHT_SIGNO(s) ((s) == SIGKILL || (s) == SIGSTOP)
