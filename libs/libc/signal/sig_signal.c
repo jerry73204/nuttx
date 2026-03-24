@@ -77,13 +77,9 @@ _sa_handler_t signal(int signo, _sa_handler_t func)
   act.sa_flags   = 0;
   sigemptyset(&act.sa_mask);
 
-  /* Check for SIG_IGN and SIG_DFL (and someday SIG_HOLD)
-   *
-   * REVISIT:  Currently SIG_IGN, SIG_DFL, and SIG_HOLD have the same value
-   * and cannot be distinguished.
-   */
+  /* Check for SIG_IGN and SIG_DFL */
 
-  if (func != SIG_DFL /* && func != SIG_IGN */)
+  if (func != SIG_DFL && func != SIG_IGN)
     {
       /* Add the signal to the set of signals to be ignored when the signal
        * handler executes.
