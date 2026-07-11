@@ -32,6 +32,8 @@
 
 #include <nuttx/compiler.h>
 #include <nuttx/kmalloc.h>
+#include <nuttx/mutex.h>
+#include <nuttx/semaphore.h>
 #include <nuttx/net/ip.h>
 #include <nuttx/net/netdev_lowerhalf.h>
 #include <nuttx/virtio/virtio.h>
@@ -135,6 +137,24 @@ struct virtio_net_priv_s
 #endif
 
   spinlock_t                lock[VIRTIO_NET_NUM];
+
+  /* Control-queue command state (#167). The device DMAs the ack and posts
+   * the completion token ASYNCHRONOUSLY, so the R/W buffers and the sem must
+   * outlive the caller's stack frame — the original stack-allocated versions
+   * were reused by the returning frame before a late/duplicate completion
+   * landed, smashing a saved return address (rv-virt boot panic, EPC=0x4).
+   * `ctrl_lock` serializes commands so this single shared set is safe.
+   */
+
+  mutex_t                   ctrl_lock; /* Serializes control-queue commands */
+  sem_t                     ctrl_sem;  /* Completion token (posted from IRQ) */
+  struct
+  {
+    uint8_t class;
+    uint8_t cmd;
+  } ctrl_hdr;                          /* CTRL header (device reads) */
+  uint8_t                   ctrl_data; /* CTRL payload (device reads) */
+  uint8_t                   ctrl_ack;  /* CTRL ack (device writes) */
 
   /* Virtio device information */
 
@@ -547,43 +567,49 @@ static int virtio_net_send_ctrl_rx(FAR struct virtio_net_priv_s *priv,
                                    uint8_t cmd, uint8_t on)
 {
   FAR struct virtqueue *vq = priv->vdev->vrings_info[VIRTIO_NET_CTRL].vq;
-  struct
-  {
-    uint8_t class;
-    uint8_t cmd;
-  } hdr = { VIRTIO_NET_CTRL_RX, cmd };
-  uint8_t data = on;
-  uint8_t ack = VIRTIO_NET_ERR;
   struct virtqueue_buf vb[3];
   irqstate_t flags;
-  sem_t ctl_sem;
   int ret;
 
-  nxsem_init(&ctl_sem, 0, 0);
+  /* #167 — serialize control commands and DMA to/from the priv-embedded
+   * buffers, never the stack: the device writes `ctrl_ack` and posts the
+   * completion token asynchronously, so a stack frame would be reused
+   * before a late completion landed and smash a saved return address.
+   */
+
+  nxmutex_lock(&priv->ctrl_lock);
+
+  priv->ctrl_hdr.class = VIRTIO_NET_CTRL_RX;
+  priv->ctrl_hdr.cmd   = cmd;
+  priv->ctrl_data      = on;
+  priv->ctrl_ack       = VIRTIO_NET_ERR;
 
   /* Three sg slots: hdr (R) + payload (R) + ack (W). Linux's
    * virtio_net does the same split — QEMU's parser is lenient about
-   * concatenation but strict about hdr being its own sg slot. */
+   * concatenation but strict about hdr being its own sg slot. `vb` may
+   * stay on the stack: the device reads the copied vring descriptors, not
+   * `vb` itself, and `virtqueue_add_buffer` completes the copy inline. */
 
-  vb[0].buf = &hdr;
-  vb[0].len = sizeof(hdr);
-  vb[1].buf = &data;
-  vb[1].len = sizeof(data);
-  vb[2].buf = &ack;
-  vb[2].len = sizeof(ack);
+  vb[0].buf = &priv->ctrl_hdr;
+  vb[0].len = sizeof(priv->ctrl_hdr);
+  vb[1].buf = &priv->ctrl_data;
+  vb[1].len = sizeof(priv->ctrl_data);
+  vb[2].buf = &priv->ctrl_ack;
+  vb[2].len = sizeof(priv->ctrl_ack);
 
   flags = spin_lock_irqsave(&priv->lock[VIRTIO_NET_CTRL]);
-  virtqueue_add_buffer(vq, vb, 2, 1, &ctl_sem);
+  virtqueue_add_buffer(vq, vb, 2, 1, &priv->ctrl_sem);
   virtqueue_kick(vq);
   spin_unlock_irqrestore(&priv->lock[VIRTIO_NET_CTRL], flags);
 
-  ret = nxsem_wait_uninterruptible(&ctl_sem);
-  nxsem_destroy(&ctl_sem);
-  if (ret < 0)
+  ret = nxsem_wait_uninterruptible(&priv->ctrl_sem);
+  if (ret >= 0)
     {
-      return ret;
+      ret = (priv->ctrl_ack == VIRTIO_NET_OK) ? OK : -EIO;
     }
-  return (ack == VIRTIO_NET_OK) ? OK : -EIO;
+
+  nxmutex_unlock(&priv->ctrl_lock);
+  return ret;
 }
 
 #ifdef CONFIG_NET_MCASTGROUP
@@ -682,6 +708,8 @@ static int virtio_net_init(FAR struct virtio_net_priv_s *priv,
   spin_lock_init(&priv->lock[VIRTIO_NET_RX]);
   spin_lock_init(&priv->lock[VIRTIO_NET_TX]);
   spin_lock_init(&priv->lock[VIRTIO_NET_CTRL]);
+  nxmutex_init(&priv->ctrl_lock);
+  nxsem_init(&priv->ctrl_sem, 0, 0);
   priv->vdev = vdev;
   vdev->priv = priv;
 
@@ -873,6 +901,8 @@ static void virtio_net_remove(FAR struct virtio_device *vdev)
   netdev_lower_unregister((FAR struct netdev_lowerhalf_s *)priv);
   virtio_reset_device(vdev);
   virtio_delete_virtqueues(vdev);
+  nxmutex_destroy(&priv->ctrl_lock);
+  nxsem_destroy(&priv->ctrl_sem);
 #ifdef CONFIG_DRIVERS_WIFI_SIM
   g_netdev_num--;
   wifi_sim_remove(&priv->lower);
