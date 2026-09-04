@@ -112,7 +112,33 @@ SECTIONS
       _enoinit = ABSOLUTE(.);
   } > RAM
 
-  .bss : {                     /* BSS */
+  /* Keep .bss in a PT_LOAD of its own.
+   *
+   * When .bss lands in the same program header as .data, that header has
+   * p_filesz ~= 3.5 KB and p_memsz ~= 600 KB, and an ELF loader has to
+   * materialise the difference as zeros AT THE SEGMENT'S PHYSICAL ADDRESS --
+   * which for this board is the machine's flash aperture, because .data is
+   * `AT > ROM`. QEMU 11 pushes those ~600 KB through the flash device one
+   * store at a time: measured ~31 KB/s, i.e. ~19.6 s of emulator work before
+   * the guest executes its first instruction. QEMU 6.2 does not. Splitting
+   * .bss out gives it p_filesz == 0, so the loader has nothing to load and
+   * skips it; the guest still clears .bss itself, as it always did.
+   *
+   * Whether the split happened used to be an accident of alignment: ld starts
+   * a new segment only when .bss's VMA is not contiguous with the end of the
+   * preceding section, so an image whose .data size was a multiple of .bss's
+   * 16-byte alignment got the slow layout and one 8 bytes larger got the fast
+   * one. Ten of twelve nano-ros images landed on the slow side.
+   *
+   * The ALIGN() forces that gap unconditionally (+1 before rounding, so a
+   * .data that is already aligned still moves), costing <= 15 bytes of RAM.
+   * The explicit AT is required and is not cosmetic: without it ld gives the
+   * section LMA == VMA in RAM, and an image built that way boots but cannot
+   * open its zenoh session. Keeping the LMA on the ROM run reproduces exactly
+   * the layout the naturally-split images already had.
+   */
+  .bss ALIGN(ADDR(.noinit) + SIZEOF(.noinit) + 1, 16) :
+       AT (LOADADDR(.noinit) + SIZEOF(.noinit)) {  /* BSS */
        _sbss = .;
        *(.bss*)
        . = ALIGN(4096);
